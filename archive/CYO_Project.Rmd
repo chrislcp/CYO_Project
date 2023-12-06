@@ -1,0 +1,259 @@
+---
+title: "CYO"
+output: html_document
+git: https://github.com/chrislcp/CYO_Project.git
+---
+#1-Introduction
+(an introduction/overview/executive summary section that describes the dataset and variables, and summarizes the goal of the project and key steps that were performed)
+
+As I work with environmental issues, I have chosen dataset in Kaggle concerning a river`water quality and I try a different question. The dataset was extracted from: River Water Quality EDA and Forecasting (kaggle.com), with is a river in Uckrane.
+Reference: https://www.kaggle.com/datasets/vbmokin/wq-southern-bug-river-0105202
+Dataset formats: two csv files. There were called PB_All_2000_2021 and PB_stations.
+#Define the variables
+- PB_stations-> selected: id and the length (Distance from the mouth of the river, km). The name of the station was removed, as it was needed.
+- PB_All_2000_2021
+Water Quality Parameters : O2 ,CL ,SO4, PO4, BSK5 ,Suspended, NO2, NH4
+The main goal of the project: Develop some numeric Regression Models to calculate the target column (NH4).The question is can we substitute the weekly measurement of NH4 for this Regression Model?
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+##1.1-Loading Libraries
+```{r, echo=FALSE,message=FALSE, warning=FALSE, error=FALSE}
+#Libraries
+library(tidyverse)
+library(dplyr)
+library(caret)
+library(corrplot)
+library(gam)
+library(rpart)
+library(Boruta)
+library(randomForest)
+```
+## 1.2-Data Preprocessing
+###Data Loading 
+```{r,message=FALSE,error=FALSE,warning=FALSE, error=FALSE, echo=FALSE}
+PB_All_2000_2021 <-read_delim("https://raw.githubusercontent.com/chrislcp/CYO_Project/main/archive/PB_All_2000_2021.csv",delim = ";", escape_double = FALSE, trim_ws = TRUE)
+PB_stations <- read_delim("https://raw.githubusercontent.com/chrislcp/CYO_Project/main/archive/PB_stations.csv",delim = ";", escape_double = FALSE, trim_ws = TRUE)
+```
+###Join, Selecting Columns
+```{r, warning= FALSE}
+stations <- PB_stations%>%select(id,length)
+All <-PB_All_2000_2021%>%mutate(date=str_replace_all(date,"[.]","-"))%>%mutate(date=dmy(date))%>%mutate(date=as.Date(date))
+#Add the column: length
+df <- left_join(All, stations, by = "id")
+df_total <- df
+#Filter: select stations(rows). The similar stations are:14, 15 and 16.
+df <-df%>%filter(id==c(14,15,16))
+# Remove Columns
+df <- df %>% select(-one_of('id', 'date')) 
+```
+#2-Analysis
+a methods/analysis section that explains the process and techniques used, including data cleaning, data exploration and visualization, insights gained, and your modeling approaches (you must use at least two different models or algorithms);
+ 
+##2.1 Preprocessing - Handling Missing Data
+The option applied here was to remove the entire rows that contain any NA, with the function drop_na(). 
+# 2.2 - Data Normalization
+The option applied here was to standardization mean centering and scaling in train function: preProcess = c("center","scale") or preProcess = c("range")
+
+https://www.rdocumentation.org/packages/caret/versions/6.0-92/topics/preProcess
+```{r}
+##Handling Missing Data - 
+df <- df %>% drop_na()
+
+
+df_norm <- scale(df)
+#df <- df_norm 
+df <- as.data.frame(df)
+```
+## 2.2 Dataviz - Exploratory Data Analysis (EDA)
+```{r}
+# Box Plot of the water quality parameters 
+df %>% select(-one_of('length')) %>% boxplot(df)
+
+# Box Plot of the water Target 
+hist(df$NH4)
+#str(df) 
+```
+```{r}
+#Ask if there is an near Zero variance
+nzv <- nearZeroVar(df)
+
+#See all the stations 
+hist(df_total$id)
+```
+### 2.2.1 Unimportant variables 
+```{r}
+#Boruta function helps to identify unimportant variables
+boruta_results <- Boruta(NH4~., df)
+boruta_results
+plot(boruta_results)
+```
+### 2.2.2 Correlograms (Pearson and Spearman)
+```{r}
+CorPearson <-cor(df[1:9], method = "pearson") 
+corrplot(CorPearson, method="circle",title = "Pearson", outline = TRUE, addCoefasPercent = TRUE) 
+
+CorSpearman <-cor(df[1:9], method = "spearman") 
+corrplot(CorSpearman, method="circle",title ="Spearman") 
+```
+## 2.3 - Data Preparation to Machine Learning, Create Partition: train and test sets.
+- The train(70%) and the test(30%) set were created to run the models. 
+- Data Normalization or Standardization 
+```{r, warning=FALSE}
+
+#Define the target 
+
+df <- df %>% rename(y=NH4)
+
+# Remove Columns
+#df <- df %>% select(-one_of('BSK5')) 
+
+# Split the dataset: train and test sets.
+set.seed(1, sample.kind="Rounding") 
+test_index <- createDataPartition(df$y, times = 1, p = 0.7, list = FALSE)
+train_set <- df%>%slice(-test_index)
+test_set <- df%>%slice(test_index)
+
+
+```
+#3-Results
+a results section that presents the modeling results and discusses the model performance 
+##3.1 - method: Generalized Linear Model(glm)
+```{r}
+set.seed(1, sample.kind="Rounding") 
+#getModelInfo("glm")
+#modelLookup("glm")
+
+train_glm <- train(y~.,method="glm",data=train_set)
+y_hat_glm <- predict(train_glm,test_set)
+
+d = test_set$y - y_hat_glm
+mse = mean((d)^2)
+mae = mean(abs(d))
+rmse = sqrt(mse)
+R2 = 1-(sum((d)^2)/sum((test_set$y-mean(test_set$y))^2))
+cat(" MAE:", mae, "\n", "MSE:", mse, "\n", 
+    "RMSE:", rmse, "\n", "R-squared:", R2,"\n")
+head(train_glm$results)
+plot(y_hat_glm,test_set$y)
+```
+##3.2 - method: k-Nearest Neighbors(knn)
+```{r}
+set.seed(1, sample.kind="Rounding") 
+
+control <- trainControl(method = "cv", number = 10, p = .9)
+train_knn <- train(y~.,method = "knn",trControl = control,data=train_set,preProc = c("center","scale"),tuneGrid = data.frame(k = seq(9, 71, 2)))
+
+#train_knn$bestTune #tirar
+#fit_knn <- knn3(y˜.,k=39,data=train_set) # tirar
+
+y_hat_knn <- predict(train_knn, test_set, type = "raw")
+train_knn$results
+RMSE_knn_min <- train_knn$results$RMSE
+k_min <- which.min(RMSE)
+```
+##3.3 - method: CART(rpart)
+```{r}
+set.seed(1, sample.kind="Rounding") 
+train_rpart <- train(y~.,method="rpart",data=train_set,preProc = c("center","scale"))
+y_hat_rpart <- predict(train_rpart, test_set, type = "raw")
+train_rpart$results
+plot(y_hat_rpart,test_set$y)
+ggplot(train_rpart, highlight = TRUE)
+```
+##3.4 method: Random Forest(rf)
+```{r}
+set.seed(1, sample.kind="Rounding") 
+train_rf<- train(y~.,method="rf",data=train_set,preProc = c("center","scale"))
+y_hat_rf <- predict(train_rf, test_set, type = "raw")
+train_rf$results
+plot(y_hat_rf,test_set$y)
+ggplot(train_rf, highlight = TRUE)
+
+## EDX model of Otmization (Chapter 32)
+
+library(randomForest)
+control <- trainControl(method="cv", number = 5)
+grid <- data.frame(mtry = c(1, 5, 10, 25, 50, 100))
+train_rf<- train(y~.,method="rf",data=train_set,preProc = c("center","scale"),ntree = 150,trControl = control,tuneGrid = grid,nSamp = 5000)
+
+train_rf$results #<- tirar
+
+#fit our final model
+mtry = train_rf$bestTune$mtry
+
+fit_rf <- randomForest(y~., mtry = train_rf$bestTune$mtry, data=train_set)
+
+# Do we have enough trees?
+plot(fit_rf)
+imp <- as.data.frame(importance(fit_rf))
+imp%>%arrange(desc(IncNodePurity))
+
+#Conclusions _> After optimizate the model and calculate the Importance(IncNodePurity) of each attribute to the target (NH4) in this model. We could remove from "df" the less important attributes and try to run all the code again and compare.  #For example, length, Suspended and SO4.	
+
+
+#We see that we achieve high accuracy:
+
+y_hat_rf <- predict(fit_rf, test_set)
+
+plot(y_hat_rf,test_set$y)
+
+```
+##3.5 method: Generalized Additive Model using LOESS(gamLoess)
+train_loess <- train(y ~ ., 
+                   method = "gamLoess", 
+                   tuneGrid=grid,
+                   data = mnist_27$train)
+
+```{r}
+set.seed(1, sample.kind="Rounding") 
+train_gamLoess <- train(y~.,method="gamLoess",data=train_set,preProc = c("center","scale"))
+#Falta definir o tuneGrid=grid na function train
+y_hat_gamLoess <- predict(train_gamLoess, test_set, type = "raw")
+train_gamLoess$results
+```
+## 3.6- Results - Comparing Models
+"To compare different models or to see how well we’re doing compared to a baseline, we will use root mean squared error (RMSE) as our loss function."
+```{r}
+set.seed(1, sample.kind="Rounding") 
+glm <- train_glm$results$RMSE
+knn <- train_knn$results$RMSE
+rpart <- train_rpart$results$RMSE
+rf <- fit_rf$results$RMSE
+gamLoess <- train_gamLoess$results$RSME
+
+methods <- c("glm", "knn","rpart","rf","gamLoess")
+RMSE_results <- c(glm,knn,rpart,rf,gamLoess)
+
+Comparing_Models_RMSE <- as.data.frame(cbind(methods,RMSE_results))
+Comparing_Models_RMSE <- Comparing_Models_RMSE %>% arrange(RMSE_results)
+Comparing_Models_RMSE
+selected_model <- Comparing_Models_RMSE[1,1]
+
+selected_model
+
+ 
+plot(test_set$y, y_hat_rpart)
+#imp <- importance(train_rpart)
+
+```
+## Ideas: Simple Regression Model  
+```{r}
+
+modelo = lm(df$y~., data = df)
+par(mfrow = c(2,2))
+plot(modelo, which=c(1:4), pch=20)
+
+
+```
+#4-Conclusion
+a conclusion section that gives a brief summary of the report, its potential impact, its limitations, and future work.
+
+```{r}
+```
+##
+```{r}
+
+```
+
